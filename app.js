@@ -25,13 +25,15 @@ class KOMExplorer {
             zoomControl: false,
             attributionControl: false,
             // Smoothing options
-            zoomSnap: 0,            // Smooth fractional zoom
-            zoomDelta: 0.2,         // Small increments for +/- keys
-            wheelPxPerZoomLevel: 120, // Feel more like Google Maps
-            wheelDebounceTime: 40,
+            zoomSnap: 0.1,          // Smooth fractional zoom
+            zoomDelta: 0.5,         // Smaller increments for zoom
+            wheelPxPerZoomLevel: 60, // Feel more like Google Maps
+            zoomAnimation: true,
+            fadeAnimation: true,
+            markerZoomAnimation: true,
             inertia: true,          // Add momentum to panning
-            inertiaDeceleration: 3000,
-            easeLinearity: 0.1
+            inertiaDeceleration: 2000,
+            easeLinearity: 0.2
         }).setView([37.42, -122.25], 13);
 
         // Add premium dark tiles
@@ -55,94 +57,168 @@ class KOMExplorer {
             }
         });
 
-        // Hide Strava button since we are in "Public" mode
+        // Show Strava button and handle token input
         const stravaBtn = document.getElementById('strava-connect');
-        if (stravaBtn) stravaBtn.style.display = 'none';
+        if (stravaBtn) {
+            stravaBtn.style.display = 'flex';
+            stravaBtn.addEventListener('click', () => this.showTokenModal());
+        }
+    }
+
+    showTokenModal() {
+        let modal = document.getElementById('token-modal');
+        if (!modal) {
+            modal = document.createElement('div');
+            modal.id = 'token-modal';
+            modal.className = 'modal';
+            document.body.appendChild(modal);
+        }
+
+        modal.innerHTML = `
+            <div class="modal-content" style="max-width: 400px; text-align: center;">
+                <span class="close-btn" style="cursor:pointer; float:right; font-size:24px;">&times;</span>
+                <h3 style="margin-top:0;">Connect Strava</h3>
+                <p style="font-size: 14px; margin-bottom: 15px; color: #aaa;">Enter your Strava API Access Token to fetch real KOMs and segments.</p>
+                <input type="password" id="strava-token-input" placeholder="Bearer access_token..." style="width: 100%; box-sizing: border-box; padding: 10px; border-radius: 5px; border: 1px solid #333; background: #1a1a1a; color: #fff; margin-bottom: 15px;">
+                <button id="save-token-btn" style="width: 100%; padding: 10px; background: #FC4C02; color: #fff; border: none; border-radius: 5px; cursor: pointer; font-weight: bold;">SAVE TOKEN</button>
+                <p style="font-size: 12px; margin-top: 15px; color: #666;"><a href="https://developers.strava.com/" target="_blank" style="color:#FC4C02;">Get a developer token</a></p>
+            </div>
+        `;
+
+        modal.style.display = 'flex';
+        modal.querySelector('.close-btn').onclick = () => modal.style.display = 'none';
         
-        // Add a "Pro Mode" toggle or similar later if needed
+        modal.querySelector('#save-token-btn').onclick = () => {
+            const token = document.getElementById('strava-token-input').value.trim();
+            if (token) {
+                this.stravaToken = token;
+                localStorage.setItem('strava_token', token);
+                modal.style.display = 'none';
+                this.showNotification('Strava connected!', 'success');
+                this.refreshSegments();
+            }
+        };
+
+        const savedToken = localStorage.getItem('strava_token');
+        if (savedToken) {
+            document.getElementById('strava-token-input').value = savedToken;
+        }
+
+        window.onclick = (e) => { if (e.target == modal) modal.style.display = 'none'; };
     }
 
     async refreshSegments() {
         const list = document.getElementById('segments-list');
-        list.innerHTML = '<div class="loader-container"><p>Fetching local segments...</p></div>';
+        
+        this.stravaToken = localStorage.getItem('strava_token');
 
-        // Simulate API delay
-        setTimeout(() => {
-            this.generateSimulationData();
-        }, 500);
-    }
+        if (!this.stravaToken) {
+            list.innerHTML = '<div class="loader-container"><p>Click "Connect with Strava" to see real segments</p></div>';
+            return;
+        }
 
-    generateSimulationData() {
-        const center = this.map.getCenter();
-        const lat = center.lat;
-        const lng = center.lng;
+        list.innerHTML = '<div class="loader-container"><p>Fetching Strava segments...</p></div>';
 
-        // Generate 5-8 realistic segments around the current center
-        const segmentNames = [
-            "Hill Climb", "Sprint Finish", "Ridge Descent", "Valley Loop", 
-            "The Wall", "Canyon Run", "Skyline Dash", "Park Circuit",
-            "River Trail", "Summit Push", "Technical Section", "Endurance Stretch"
-        ];
+        const bounds = this.map.getBounds();
+        const sw = bounds.getSouthWest();
+        const ne = bounds.getNorthEast();
 
-        const prefixes = ["West", "East", "North", "South", "Upper", "Lower", "Old", "New"];
+        try {
+            const response = await fetch(`https://www.strava.com/api/v3/segments/explore?bounds=${sw.lat},${sw.lng},${ne.lat},${ne.lng}`, {
+                headers: { 'Authorization': `Bearer ${this.stravaToken}` }
+            });
 
-        this.segments = Array.from({ length: 6 }, (_, i) => {
-            const rLat = lat + (Math.random() - 0.5) * 0.05;
-            const rLng = lng + (Math.random() - 0.5) * 0.05;
-            const dist = Math.floor(Math.random() * 5000) + 500;
-            const grade = (Math.random() * 8).toFixed(1);
+            if (!response.ok) {
+                if (response.status === 401) {
+                    this.showNotification('Strava token expired or invalid', 'error');
+                    localStorage.removeItem('strava_token');
+                    this.stravaToken = null;
+                    this.refreshSegments();
+                    return;
+                }
+                throw new Error('Failed to fetch segments');
+            }
+
+            const data = await response.json();
+            const rawSegments = data.segments || [];
             
-            const name = `${prefixes[Math.floor(Math.random() * prefixes.length)]} ${segmentNames[Math.floor(Math.random() * segmentNames.length)]}`;
-
-            return {
-                id: i,
-                name: name,
-                distance: dist,
-                avg_grade: grade,
-                elev_difference: Math.floor(dist * (grade / 100)),
-                start_latlng: [rLat, rLng],
-                kom_name: this.getRandomName(),
-                kom_time: this.getRandomTime(dist, grade),
-                leaderboard: this.generateLeaderboard(dist, grade)
-            };
-        });
-
-        this.updateUI();
-    }
-
-    getRandomName() {
-        const names = ["Chris H.", "Sarah W.", "Mike R.", "Emma D.", "John S.", "Lisa K.", "Tom B.", "Anna M.", "David P."];
-        return names[Math.floor(Math.random() * names.length)];
-    }
-
-    getRandomTime(dist, grade) {
-        // Base speed 25km/h, adjusted for grade
-        const speedKmh = 25 - (grade * 1.5);
-        const timeHours = (dist / 1000) / speedKmh;
-        const totalSeconds = Math.floor(timeHours * 3600);
-        const mins = Math.floor(totalSeconds / 60);
-        const secs = totalSeconds % 60;
-        return `${mins}:${secs < 10 ? '0' : ''}${secs}`;
-    }
-
-    generateLeaderboard(dist, grade) {
-        return Array.from({ length: 5 }, (_, i) => {
-            const baseTime = this.getRandomTime(dist, grade);
-            // Add a few seconds for each rank
-            const [m, s] = baseTime.split(':').map(Number);
-            const extraSecs = i * (Math.floor(Math.random() * 10) + 2);
-            const total = (m * 60) + s + extraSecs;
-            const rm = Math.floor(total / 60);
-            const rs = total % 60;
+            // Limit to 10 to avoid heavy rate limits on segment details
+            const topSegments = rawSegments.slice(0, 10);
             
-            return {
-                rank: i + 1,
-                name: this.getRandomName(),
-                time: `${rm}:${rs < 10 ? '0' : ''}${rs}`,
-                date: `${Math.floor(Math.random() * 28) + 1} Oct 2025`,
-                watts: Math.floor(250 + (Math.random() * 150))
-            };
-        });
+            this.segments = await Promise.all(topSegments.map(async (seg) => {
+                let kom_name = "Unknown";
+                let kom_time = "N/A";
+                let leaderboard = [];
+                
+                try {
+                    // Fetch leaderboard
+                    const lbRes = await fetch(`https://www.strava.com/api/v3/segments/${seg.id}/leaderboard`, {
+                        headers: { 'Authorization': `Bearer ${this.stravaToken}` }
+                    });
+                    
+                    if (lbRes.ok) {
+                        const lbData = await lbRes.json();
+                        if (lbData.entries && lbData.entries.length > 0) {
+                            leaderboard = lbData.entries.map(e => ({
+                                rank: e.rank,
+                                name: e.athlete_name,
+                                time: this.formatTime(e.elapsed_time),
+                                date: new Date(e.start_date_local).toLocaleDateString(),
+                                watts: e.average_watts ? Math.round(e.average_watts) : 'N/A'
+                            }));
+                            kom_name = leaderboard[0].name;
+                            kom_time = leaderboard[0].time;
+                        }
+                    }
+
+                    if (leaderboard.length === 0) {
+                        // Fallback to segment details
+                        const detailRes = await fetch(`https://www.strava.com/api/v3/segments/${seg.id}`, {
+                            headers: { 'Authorization': `Bearer ${this.stravaToken}` }
+                        });
+                        if (detailRes.ok) {
+                            const detail = await detailRes.json();
+                            if (detail.xoms && detail.xoms.kom) {
+                                kom_time = detail.xoms.kom;
+                                kom_name = "Strava KOM";
+                            }
+                        }
+                    }
+                } catch (e) {
+                    console.error('Error fetching details for segment', seg.id, e);
+                }
+
+                return {
+                    id: seg.id,
+                    name: seg.name,
+                    distance: seg.distance,
+                    avg_grade: seg.avg_grade,
+                    elev_difference: seg.elev_difference,
+                    start_latlng: seg.start_latlng,
+                    kom_name: kom_name,
+                    kom_time: kom_time,
+                    leaderboard: leaderboard
+                };
+            }));
+
+            if (this.segments.length === 0) {
+                list.innerHTML = '<div class="loader-container"><p>No segments found in this area.</p></div>';
+            } else {
+                this.updateUI();
+            }
+
+        } catch (error) {
+            console.error('API Error:', error);
+            this.showNotification('Error fetching Strava data', 'error');
+            list.innerHTML = '<div class="loader-container"><p>Error fetching segments.</p></div>';
+        }
+    }
+
+    formatTime(seconds) {
+        if (!seconds || seconds === 'N/A') return seconds;
+        const m = Math.floor(seconds / 60);
+        const s = seconds % 60;
+        return `${m}:${s < 10 ? '0' : ''}${s}`;
     }
 
     updateUI() {
@@ -233,14 +309,14 @@ class KOMExplorer {
                         </tr>
                     </thead>
                     <tbody>
-                        ${seg.leaderboard.map(entry => `
+                        ${seg.leaderboard && seg.leaderboard.length > 0 ? seg.leaderboard.map(entry => `
                             <tr>
                                 <td class="rank">${entry.rank}</td>
                                 <td class="name">${entry.name}</td>
                                 <td class="time">${entry.time}</td>
-                                <td class="power">${entry.watts}W</td>
+                                <td class="power">${entry.watts !== 'N/A' ? entry.watts + 'W' : '-'}</td>
                             </tr>
-                        `).join('')}
+                        `).join('') : '<tr><td colspan="4" style="text-align:center; padding: 20px;">Leaderboard data unavailable.<br><small style="color:#aaa;">Strava API restricts full leaderboard access.</small></td></tr>'}
                     </tbody>
                 </table>
             </div>
